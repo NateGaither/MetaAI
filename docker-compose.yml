@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # The Python Application (FastAPI + Pipecat)
+  app:
+    build: .
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Vector-enabled Database (PostgreSQL + pgvector)
+  db:
+    image: ankane/pgvector:latest
+    environment:
+      POSTGRES_DB: meta_db
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d meta_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Session Cache (Redis)
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
