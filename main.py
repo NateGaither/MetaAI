@@ -1,100 +1,138 @@
 import os
-import httpx
 import asyncio
-from fastapi import FastAPI, WebSocket, Request
-from dotenv import load_dotenv
-from redis import Redis
-from pipecat.transports.services.small_webrtc import SmallWebRTCTransport
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.services.openai import OpenAILLMService
-from pipecat.services.cartesia import CartesiaTTSService
+import secrets
+from typing import Optional
 
-# Load configuration from setup.py's .env
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from redis import asyncio as aioredis
+from dotenv import load_dotenv
+
+from pipecat.transports.services.daily import DailyTransport, DailyParams
+from pipecat.services.openai import OpenAILLMService
+from pipecat.services.anthropic import AnthropicLLMService
+from pipecat.services.cartesia import CartesiaTTSService
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.processors.aggregators.llm_response import LLMUserResponseAggregator
+
+from utils import fetch_instructions, get_system_prompt
+from database import update_user_preference
+
+# Load environment variables
 load_dotenv()
 
-app = FastAPI()
-redis_client = Redis(host='localhost', port=6379, db=0, decode_responses=True)
+app = FastAPI(title="Project Meta AI")
 
-INSTRUCTIONS_FILE = "instructions.txt"
-GITHUB_TEMPLATE_URL = "https://raw.githubusercontent.com/pipecat-ai/pipecat/main/examples/prompts/default-assistant.txt"
+# Initialize Redis connection
+redis = aioredis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
-# --- 1. BOOTSTRAP: AI INSTRUCTIONS ---
-def load_ai_instructions():
-    if not os.path.exists(INSTRUCTIONS_FILE):
-        print(f"📂 {INSTRUCTIONS_FILE} not found. Fetching from GitHub...")
-        try:
-            response = httpx.get(GITHUB_TEMPLATE_URL)
-            response.raise_for_status()
-            with open(INSTRUCTIONS_FILE, "w") as f:
-                f.write(response.text)
-            print("✅ Instructions created successfully.")
-        except Exception as e:
-            print(f"❌ Failed to fetch instructions: {e}")
-            return "You are Meta, a helpful AI assistant."
+class ConnectRequest(BaseModel):
+    user_id: str
+
+@app.on_event("startup")
+async def startup_event():
+    """Ensure system instructions are ready before accepting connections."""
+    await fetch_instructions()
+
+def get_llm_service():
+    """Factory to select the LLM provider defined in .env."""
+    provider = os.getenv("AI_PROVIDER", "openai").lower()
+    api_key = os.getenv("AI_API_KEY")
     
-    with open(INSTRUCTIONS_FILE, "r") as f:
-        return f.read()
+    if provider == "anthropic":
+        return AnthropicLLMService(api_key=api_key)
+    # Defaulting to OpenAI for robustness
+    return OpenAILLMService(api_key=api_key)
 
-SYSTEM_PROMPT = load_ai_instructions()
+async def run_meta_pipeline(room_url: str, token: str):
+    """
+    The core Pipecat pipeline logic.
+    Orchestrates real-time audio transport, LLM processing, and TTS.
+    """
+    transport = DailyTransport(
+        room_url,
+        token,
+        "Meta Assistant",
+        DailyParams(
+            audio_out_enabled=True, 
+            transcription_enabled=True,
+            vad_enabled=True # Enable Voice Activity Detection for interruptions
+        )
+    )
 
-# --- 2. PIPECAT AI PIPELINE ---
-async def start_meta_engine(session_id: str, user_id: str):
-    # Initialize the "Brain" and "Voice" from .env settings
-    llm = OpenAILLMService(api_key=os.getenv("AI_API_KEY"), model="gpt-4o")
-    tts = CartesiaTTSService(api_key=os.getenv("CARTESIA_API_KEY"), voice_id="pro-voice-id")
+    llm = get_llm_service()
     
-    # Define Transport (WebRTC)
-    transport = SmallWebRTCTransport()
+    tts = CartesiaTTSService(
+        api_key=os.getenv("CARTESIA_API_KEY"),
+        voice_id="79a125e8-cd45-4c13-8a25-276b30c5dd0b" # Expressive British Male
+    )
 
-    # Meta's Memory Retrieval (Simplified logic for pgvector)
-    # user_pref = postgres_db.query_memory(user_id) 
+    # Register the user preference tool so Meta can call it
+    llm.register_function("update_user_preference", update_user_preference)
+
+    messages = [{"role": "system", "content": get_system_prompt()}]
+    
+    # Context aggregator manages history and handles interruptions mid-speech
+    user_response = LLMUserResponseAggregator(messages)
     
     pipeline = Pipeline([
-        transport.input(),
-        llm,
-        tts,
-        transport.output()
+        transport.input(),     # 1. Listen (WebRTC)
+        user_response,         # 2. Process Context
+        llm,                   # 3. Think (LLM)
+        tts,                   # 4. Speak (Cartesia)
+        transport.output()     # 5. Output (WebRTC)
     ])
 
-    # Save session state to Redis so other devices can find this pipeline
-    redis_client.setex(f"meta_session:{user_id}", 3600, session_id)
-    
-    await pipeline.run()
+    runner = PipelineRunner()
+    await runner.run(pipeline)
 
-# --- 3. WEB-SERVER & SIGNALING ---
 @app.post("/connect")
-async def handle_connection(request: Request):
+async def connect(request: ConnectRequest):
     """
-    Signaling endpoint: Clients call this to get a WebRTC configuration.
-    It checks Redis to see if the user has an existing conversation to resume.
+    Main signaling endpoint. 
+    Implements Hub-and-Spoke session continuity via Redis.
     """
-    data = await request.json()
-    user_id = data.get("user_id", "anonymous")
+    user_id = request.user_id
     
-    # SESSION CACHE: Check Redis for an existing ID
-    active_session = redis_client.get(f"meta_session:{user_id}")
+    # 1. Check for existing session (Cross-device handoff)
+    session_id = await redis.get(f"session:{user_id}")
     
-    if active_session:
-        print(f"🔄 Resuming existing session {active_session} for user {user_id}")
-        return {"session_id": active_session, "status": "resuming"}
+    if session_id:
+        session_id = session_id.decode()
+        room_url = await redis.get(f"room:{session_id}")
+        if room_url:
+            return {
+                "room_url": room_url.decode(), 
+                "session_id": session_id,
+                "status": "resumed"
+            }
 
-    # NEW SESSION: Create a unique ID
-    new_session_id = f"meta_{user_id}_{os.urandom(4).hex()}"
+    # 2. Create new session if none exists
+    new_session_id = secrets.token_hex(8)
+    daily_key = os.getenv("DAILY_API_KEY")
     
-    # Start the AI pipeline in the background
-    asyncio.create_task(start_meta_engine(new_session_id, user_id))
+    # Initialize Daily Transport to create a temporary room
+    transport = DailyTransport(api_key=daily_key)
+    try:
+        # Create a room with a 60-minute expiry for security
+        room_url = await transport.create_room(params={"properties": {"exp": 3600}})
+        token = await transport.create_token(room_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create WebRTC room: {str(e)}")
+
+    # 3. Persist session state in Redis
+    await redis.set(f"session:{user_id}", new_session_id, ex=3600)
+    await redis.set(f"room:{new_session_id}", room_url, ex=3600)
+    
+    # 4. Spawn the AI Pipeline in the background
+    asyncio.create_task(run_meta_pipeline(room_url, token))
     
     return {
-        "session_id": new_session_id,
-        "status": "started",
-        "instructions_version": "v1.0-github-sync"
+        "room_url": room_url, 
+        "session_id": new_session_id, 
+        "status": "initialized"
     }
-
-@app.get("/admin/instructions")
-async def view_instructions():
-    """Webserver feature: Read the current instructions via API"""
-    with open(INSTRUCTIONS_FILE, "r") as f:
-        return {"content": f.read()}
 
 if __name__ == "__main__":
     import uvicorn
