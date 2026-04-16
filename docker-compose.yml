@@ -2,14 +2,17 @@ version: '3.8'
 services:
   meta-core:
     build: .
-    volumes: [".:/app", "./plugins:/app/plugins"]
+    volumes: 
+      - .:/app
+      - ./plugins:/app/plugins
+    env_file: 
+      - .env  # Specifically tells Docker to look here
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://meta:pass@db:5432/metadb
-      - STT_URL=http://stt:8000
-      - TTS_URL=http://tts:8000
-    env_file: .env
-    depends_on: [redis, db, stt, tts]
+      - DATABASE_URL=postgresql://meta:${POSTGRES_PASSWORD}@db:5432/metadb
+    depends_on:
+      - redis
+      - db
     network_mode: "host"
 
   stt:
