@@ -1,23 +1,21 @@
 FROM python:3.11-slim
 
-# Install system audio and build dependencies
+# Install system dependencies for audio and postgres
 RUN apt-get update && apt-get install -y \
     build-essential \
-    libasound2-dev \
+    libpq-dev \
     portaudio19-dev \
-    python3-dev \
+    libasound2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python requirements
+# Install requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
+# Copy the rest of the code
 COPY . .
 
-# Expose FastAPI port
-EXPOSE 8000
-
+# Start the orchestrator
 CMD ["python", "main.py"]
