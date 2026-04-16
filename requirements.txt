@@ -1,1 +1,27 @@
+# --- Core Orchestration ---
+pipecat-ai[daily,openai,anthropic,cartesia]
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx
 
+# --- Database & Memory ---
+sqlalchemy
+psycopg2-binary
+pgvector
+redis
+
+# --- WebRTC & Networking ---
+# Note: small-webrtc is often part of the pipecat-ai package, 
+# but we ensure the signaling server is present.
+websockets
+cryptography
+
+# --- Local AI Interaction ---
+# We use the openai-compatible client to talk to 
+# local Faster-Whisper and Kokoro containers.
+openai
+
+# --- Utils ---
+aiohttp
+certifi
