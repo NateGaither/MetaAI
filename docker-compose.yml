@@ -1,4 +1,5 @@
 version: '3.8'
+
 services:
   meta-core:
     build: .
@@ -6,7 +7,7 @@ services:
       - .:/app
       - ./plugins:/app/plugins
     env_file: 
-      - .env  # Specifically tells Docker to look here
+      - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql://meta:${POSTGRES_PASSWORD}@db:5432/metadb
@@ -19,27 +20,34 @@ services:
     image: fedirz/faster-whisper-server:latest-cpu
     environment:
       - WHISPER_MODEL=base
-      - WHISPER_THREADS=1 # Allocate 1 core
-    ports: ["8001:8000"]
+      - WHISPER_THREADS=1 # Allocate 1 core for i5-6500T
+    ports:
+      - "8001:8000"
 
   tts:
-    image: kokoro-onnx-cpu:latest
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.1.4
+    container_name: meta-tts
+    ports:
+      - "8002:8880"
     environment:
-      - NUM_THREADS=1 # Allocate 1 core
-    ports: ["8002:8000"]
+      - NUM_THREADS=1 
 
   redis:
     image: redis:alpine
+    container_name: meta-redis
 
   db:
     image: ankane/pgvector:latest
+    container_name: meta-db
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=metadb
-    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   coturn:
     image: coturn/coturn
+    container_name: meta-turn
     network_mode: "host"
 
 volumes:
