@@ -21,31 +21,41 @@ def load_plugins(llm):
         llm.register_tool(module.config, module.execute)
 
 async def start_meta(user_id: str):
-    # Sovereign Transport (No Daily.co)
     transport = SmallWebRTCTransport() 
     
-    # Local-Only Engine URLs (Docker Internal)
     stt = FasterWhisperSTTService(url="http://stt:8000")
-    tts = KokoroTTSService(url="http://tts:8000")
     
+    # Corrected TTS Config
+    tts = KokoroTTSService(url="http://tts:8880/v1", voice="af_sky")
+
     llm = OpenAILLMService(
         api_key=os.getenv("AI_API_KEY"),
         base_url="https://openrouter.ai/api/v1"
     )
     
-    load_plugins(llm) # Dynamic plugin registration
+    # 1. Define initial context (Brain initialization)
+    messages = [{"role": "system", "content": "You are Meta, a sovereign AI."}]
+    user_response = LLMUserResponseAggregator(messages)
 
-    # Pipeline: Audio In -> STT -> Thresholded Memory -> LLM -> TTS -> Audio Out
+    # 2. Add Plugin Registration logic (with error handling)
+    try:
+        load_plugins(llm)
+    except Exception as e:
+        print(f"Plugin load failed: {e}")
+
+    # 3. Optimized Pipeline Flow
     pipeline = Pipeline([
-        transport.input(),
-        stt,
-        LLMUserResponseAggregator([]), # Context management
-        llm,
-        tts,
-        transport.output()
+        transport.input(),     # Mic
+        stt,                   # Audio -> Text
+        user_response,         # Text Aggregator
+        llm,                   # Text -> AI Text
+        tts,                   # AI Text -> Audio
+        transport.output()     # Speaker
     ])
     
-    await pipeline.run()
+    from pipecat.pipeline.runner import PipelineRunner
+    runner = PipelineRunner()
+    await runner.run(pipeline)
 
 @app.post("/connect")
 async def connect(user_id: str):
